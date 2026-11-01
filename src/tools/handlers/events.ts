@@ -35,6 +35,7 @@ const EVENT_ALLOWLIST = [
   "tracks_availability",
   "repeating_type",
   "formatted_title",
+  "label",
   "points_for_team",
   "points_for_opponent",
   "formatted_results",
@@ -144,6 +145,42 @@ export async function handleGetLocation(args: ToolArgs): Promise<CallToolResult>
   }
 }
 
+/**
+ * TeamSnap only notifies families about an event create/update when the write
+ * includes notify_team: true. These are write directives, not event data, so
+ * they are taken as top-level tool args and validated here.
+ */
+type NotifyFields = { notify_team?: boolean; notify_team_as_member_id?: string | number };
+
+function readNotifyArgs(args: ToolArgs): { ok: true; fields: NotifyFields } | { ok: false; message: string } {
+  const fields: NotifyFields = {};
+  if (args.notify_team !== undefined) {
+    if (typeof args.notify_team !== "boolean") {
+      return { ok: false, message: "notify_team must be a boolean" };
+    }
+    fields.notify_team = args.notify_team;
+  }
+  if (args.notify_team_as_member_id !== undefined) {
+    const v = args.notify_team_as_member_id;
+    if (!((typeof v === "string" && v.trim() !== "") || (typeof v === "number" && Number.isFinite(v)))) {
+      return { ok: false, message: "notify_team_as_member_id must be a non-empty string or a number" };
+    }
+    fields.notify_team_as_member_id = v;
+  }
+  return { ok: true, fields };
+}
+
+function notificationSummary(fields: NotifyFields): Record<string, unknown> {
+  return {
+    notify_team: fields.notify_team === true,
+    notify_team_as_member_id: fields.notify_team_as_member_id ?? null,
+    notification:
+      fields.notify_team === true
+        ? "TeamSnap WILL notify the team about this change."
+        : "No notification will be sent to families (notify_team is not true).",
+  };
+}
+
 export async function handleCreateEvent(args: ToolArgs): Promise<CallToolResult> {
   const teamId = requireString(args, "team_id");
   const name = requireString(args, "name");
@@ -155,8 +192,11 @@ export async function handleCreateEvent(args: ToolArgs): Promise<CallToolResult>
   const notes = typeof args.notes === "string" ? args.notes : undefined;
   const uniform = typeof args.uniform === "string" ? args.uniform : undefined;
   const arrivalMinutesEarly = typeof args.arrival_minutes_early === "number" ? args.arrival_minutes_early : undefined;
+  const label = typeof args.label === "string" ? args.label : undefined;
   const idempotencyKey = typeof args.idempotency_key === "string" ? args.idempotency_key : undefined;
   const preview = args.preview !== false;
+  const notify = readNotifyArgs(args);
+  if (!notify.ok) return error(notify.message);
 
   const fields: Record<string, unknown> = {
     team_id: teamId,
@@ -170,12 +210,15 @@ export async function handleCreateEvent(args: ToolArgs): Promise<CallToolResult>
   if (notes !== undefined) fields.notes = notes;
   if (uniform !== undefined) fields.uniform = uniform;
   if (arrivalMinutesEarly !== undefined) fields.minutes_to_arrive_early = arrivalMinutesEarly;
+  if (label !== undefined) fields.label = label;
+  Object.assign(fields, notify.fields);
 
   if (preview) {
     return success({
       preview: true,
       would_post: "events",
       template: buildTemplate(fields).template,
+      ...notificationSummary(notify.fields),
     });
   }
 
@@ -209,7 +252,13 @@ const EVENT_PATCH_ALLOWED = [
   "is_canceled",
   "opponent_id",
   "minutes_to_arrive_early",
+  "points_for_team",
+  "points_for_opponent",
+  "label",
 ] as const;
+
+// Write directives that must never be smuggled in via `patch`; they are top-level args.
+const NOTIFY_KEYS = ["notify_team", "notify_team_as_member_id"] as const;
 
 export async function handleUpdateEvent(args: ToolArgs): Promise<CallToolResult> {
   const eventId = requireString(args, "event_id");
@@ -224,10 +273,21 @@ export async function handleUpdateEvent(args: ToolArgs): Promise<CallToolResult>
   if (keys.length === 0) {
     return error("patch must contain at least one field");
   }
+  const misplacedNotify = keys.filter((k) => (NOTIFY_KEYS as readonly string[]).includes(k));
+  if (misplacedNotify.length > 0) {
+    return error(
+      `${misplacedNotify.join(", ")} must be passed as top-level arguments, not inside patch.`
+    );
+  }
   const unknown = keys.filter((k) => !(EVENT_PATCH_ALLOWED as readonly string[]).includes(k));
   if (unknown.length > 0) {
     return error(`patch contains unsupported fields: ${unknown.join(", ")}. Allowed: ${EVENT_PATCH_ALLOWED.join(", ")}`);
   }
+
+  const notify = readNotifyArgs(args);
+  if (!notify.ok) return error(notify.message);
+  const body: Record<string, unknown> = { ...patch, ...notify.fields };
+  const notifySummary = notificationSummary(notify.fields);
 
   const cancelling = patch.is_canceled === true;
   if (!preview && cancelling) {
@@ -236,8 +296,9 @@ export async function handleUpdateEvent(args: ToolArgs): Promise<CallToolResult>
       return success({
         preview: true,
         would_patch: `events/${eventId}`,
-        with: patch,
-        warning: "Cancelling this event notifies the team.",
+        with: body,
+        ...notifySummary,
+        warning: "Cancelling this event marks it canceled for the whole team.",
         blocked: check.reason,
       });
     }
@@ -247,8 +308,9 @@ export async function handleUpdateEvent(args: ToolArgs): Promise<CallToolResult>
     return success({
       preview: true,
       would_patch: `events/${eventId}`,
-      with: patch,
-      warning: cancelling ? "Cancelling this event notifies the team. Pass confirm: true to send." : undefined,
+      with: body,
+      ...notifySummary,
+      warning: cancelling ? "Cancelling this event marks it canceled for the whole team. Pass confirm: true to send." : undefined,
     });
   }
 
@@ -256,7 +318,7 @@ export async function handleUpdateEvent(args: ToolArgs): Promise<CallToolResult>
 
   try {
     const core = teamsnapClient.getCore();
-    const updated = await core.write("PATCH", ENDPOINTS.eventById(eventId), patch);
+    const updated = await core.write("PATCH", ENDPOINTS.eventById(eventId), body);
     const picked = pickEventFields(updated);
     const viewerTZ = getViewerTZ();
     const localized = localizeEventTimes(picked as EventLike, { viewerTZ });
