@@ -297,7 +297,7 @@ export const tools: Tool[] = [
   {
     name: "teamsnap_create_event",
     description:
-      "Create a new event (game, practice, meeting). Returns the created event with localized times. Preview by default.",
+      "Create a new event (game, practice, meeting). Returns the created event with localized times. Preview by default. IMPORTANT: TeamSnap sends NO notification to families about the new event unless notify_team is true (default: off). The preview shows whether a notification would fire.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -311,6 +311,16 @@ export const tools: Tool[] = [
         notes: { type: "string" },
         uniform: { type: "string" },
         arrival_minutes_early: { type: "number" },
+        label: { type: "string", description: "Optional event label (TeamSnap uses this for game titles)" },
+        notify_team: {
+          type: "boolean",
+          description:
+            "If true, TeamSnap notifies the team/families about this event. Default off: without notify_team: true, NO notification is sent.",
+        },
+        notify_team_as_member_id: {
+          type: ["string", "number"],
+          description: "Optional member id the notification is sent as (only meaningful with notify_team: true)",
+        },
         idempotency_key: { type: "string", description: "Optional 60s dedup key" },
         preview: { type: "boolean", description: "If true (default), return the payload without posting" },
       },
@@ -320,7 +330,7 @@ export const tools: Tool[] = [
   {
     name: "teamsnap_update_event",
     description:
-      "Update an existing event via a patch object. Non-destructive fields (name, start_date, location_id, duration_in_minutes, notes, uniform, opponent_id, minutes_to_arrive_early) update freely. Setting is_canceled: true requires confirm: true because it notifies the team.",
+      "Update an existing event via a patch object. Non-destructive fields (name, start_date, location_id, duration_in_minutes, notes, uniform, opponent_id, minutes_to_arrive_early, label, points_for_team, points_for_opponent) update freely. Setting is_canceled: true requires confirm: true. IMPORTANT: TeamSnap sends NO notification to families about the change unless the top-level notify_team arg is true (default: off). The preview shows whether a notification would fire.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -328,7 +338,16 @@ export const tools: Tool[] = [
         patch: {
           type: "object",
           description:
-            "Object of fields to update. Supported keys: name, start_date, location_id, duration_in_minutes, notes, uniform, opponent_id, minutes_to_arrive_early, is_canceled.",
+            "Object of event fields to update. Supported keys: name, start_date, location_id, duration_in_minutes, notes, uniform, opponent_id, minutes_to_arrive_early, is_canceled, label, points_for_team, points_for_opponent (game scores). Do NOT put notify_team here; it is a top-level argument.",
+        },
+        notify_team: {
+          type: "boolean",
+          description:
+            "Top-level (not in patch). If true, TeamSnap notifies the team/families about this update. Default off: without notify_team: true, NO notification is sent.",
+        },
+        notify_team_as_member_id: {
+          type: ["string", "number"],
+          description: "Top-level (not in patch). Optional member id the notification is sent as (only meaningful with notify_team: true)",
         },
         preview: { type: "boolean", description: "If true (default), return the payload without patching" },
         confirm: { type: "boolean", description: "Required when patch.is_canceled is true" },
